@@ -1,27 +1,22 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const modelName = "gemini-3.1-pro-preview";
-
-let _model = null;
-
-export function initModel(apiKey) {
-  const genAI = new GoogleGenerativeAI(apiKey);
-  _model = genAI.getGenerativeModel({ model: modelName });
-  return _model;
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey) {
+  console.error('Error: GEMINI_API_KEY environment variable is missing.');
+  process.exit(1);
 }
 
-export async function countTokens(text) {
+const modelName = "gemini-3.1-pro-preview";
+const genAI = new GoogleGenerativeAI(apiKey);
+const model = genAI.getGenerativeModel({ model: modelName });
+
+async function countTokens(text) {
   if (!text || text.trim().length === 0) return 0;
-  if (!_model) {
-    console.error('Error: Generative model has not been initialized. Call initModel(apiKey) first.');
-    return 0;
-  }
   try {
-    const response = await _model.countTokens(text);
+    const response = await model.countTokens(text);
     return response.totalTokens;
   } catch (err) {
     console.error(`Error counting tokens:`, err.message);
@@ -29,7 +24,7 @@ export async function countTokens(text) {
   }
 }
 
-export function parseSkillMd(content) {
+function parseSkillMd(content) {
   const frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
   const match = content.match(frontmatterRegex);
 
@@ -43,7 +38,7 @@ export function parseSkillMd(content) {
   }
 }
 
-export async function listFilesRecursiveLocal(dir) {
+async function listFilesRecursiveLocal(dir) {
   let results = [];
   try {
     const list = fs.readdirSync(dir);
@@ -62,7 +57,7 @@ export async function listFilesRecursiveLocal(dir) {
   return results;
 }
 
-export class GitHelper {
+class GitHelper {
   constructor() {
     try {
       this.root = execSync('git rev-parse --show-toplevel', { stdio: 'pipe' }).toString().trim();
@@ -89,6 +84,7 @@ export class GitHelper {
 
   listReferenceFiles(ref, dirRelativePath) {
     try {
+      // Use bash behavior to catch errors if folder doesn't exist
       const out = execSync(`git ls-tree -r --name-only ${ref} "${dirRelativePath}" 2>/dev/null || true`, { stdio: 'pipe', cwd: this.root }).toString();
       return out.split('\n').filter(Boolean);
     } catch {
@@ -113,7 +109,7 @@ export class GitHelper {
   }
 }
 
-export async function analyzeSkill(skillFolderPath, ref = null, gitHelper = null, countFn = countTokens) {
+async function analyzeSkill(skillFolderPath, ref = null, gitHelper = null) {
   let totalTokens = 0;
   let breakdown = [];
   const skillName = path.basename(skillFolderPath);
@@ -141,13 +137,13 @@ export async function analyzeSkill(skillFolderPath, ref = null, gitHelper = null
     const { frontmatter, body } = parseSkillMd(skillMdContent);
 
     if (frontmatter) {
-      const fmTokens = await countFn(frontmatter);
+      const fmTokens = await countTokens(frontmatter);
       breakdown.push({ Entity: 'SKILL.md (Frontmatter)', Tokens: fmTokens, Type: 'Frontmatter' });
       totalTokens += fmTokens;
     }
 
     if (body) {
-      const bodyTokens = await countFn(body);
+      const bodyTokens = await countTokens(body);
       breakdown.push({ Entity: 'SKILL.md (Body)', Tokens: bodyTokens, Type: 'Body' });
       totalTokens += bodyTokens;
     }
@@ -164,7 +160,7 @@ export async function analyzeSkill(skillFolderPath, ref = null, gitHelper = null
     const relativePath = path.relative(skillFolderPath, refFile);
     const fileContent = getFile(refFile);
     if (fileContent) {
-      const fileTokens = await countFn(fileContent);
+      const fileTokens = await countTokens(fileContent);
       breakdown.push({ Entity: relativePath, Tokens: fileTokens, Type: 'Reference' });
       totalTokens += fileTokens;
     }
@@ -174,13 +170,6 @@ export async function analyzeSkill(skillFolderPath, ref = null, gitHelper = null
 }
 
 async function main() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error('Error: GEMINI_API_KEY environment variable is missing.');
-    process.exit(1);
-  }
-  initModel(apiKey);
-
   const args = process.argv.slice(2);
   let compareRef = null;
   let isJson = false;
@@ -258,18 +247,21 @@ async function main() {
   let allSkillsSummary = [];
   let jsonOutput = { skills: {}, summary: [] };
 
+  // Sort paths to have a consistent output
   const sortedPaths = Array.from(allSkillPaths).sort();
 
   for (const skillPath of sortedPaths) {
     const skillName = path.basename(skillPath);
 
-    const localStats = await analyzeSkill(skillPath, null, null, countTokens);
+    // Calculate local
+    const localStats = await analyzeSkill(skillPath, null, null);
     grandTotalLocal += localStats.totalTokens;
     jsonOutput.skills[skillName] = { localTotal: localStats.totalTokens, breakdown: [] };
 
+    // Calculate ref if checking
     let refTokens = 0;
     if (compareRef) {
-      const refStats = await analyzeSkill(skillPath, compareRef, gitHelper, countTokens);
+      const refStats = await analyzeSkill(skillPath, compareRef, gitHelper);
       refTokens = refStats.totalTokens;
       grandTotalRef += refTokens;
       jsonOutput.skills[skillName].refTotal = refTokens;
@@ -368,6 +360,4 @@ async function main() {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch(console.error);
-}
+main().catch(console.error);
